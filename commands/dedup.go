@@ -1,11 +1,11 @@
 package main
 
 import (
-	"compress/gzip"
-	"hash/adler32"
+	"hash/fnv"
 	"os"
 	"strings"
 
+	"github.com/kshedden/gzutils"
 	"github.com/kshedden/hashcluster"
 )
 
@@ -14,38 +14,47 @@ type empty_t struct{}
 func main() {
 
 	if len(os.Args) != 2 {
-		panic("usage: dedup infile")
+		panic("usage: dedup fastafile dropfile")
 	}
+
+	var empty empty_t
 
 	infile := os.Args[1]
-	outfile := strings.Replace(infile, ".gz", "dedup.gz", 1)
+	outfile := strings.Replace(infile, ".fasta.gz", "_dedup.fasta.gz", 1)
 
-	fr := hashcluster.NewFastaReader(infile)
+	rdr := gzutils.NewGZFileReader(infile)
+	defer rdr.Close()
+	fr := hashcluster.NewFastaReader(rdr)
 
-	ofd, err := os.Create(outfile)
-	if err != nil {
-		panic(err)
-	}
-	defer ofd.Close()
-	out := gzip.NewWriter(ofd)
+	out := gzutils.NewGZFileWriter(outfile)
 	defer out.Close()
 
-	hash := adler32.New()
+	logfile := strings.Replace(infile, ".fasta.gz", "_log.gz", 1)
+	log := gzutils.NewGZFileWriter(logfile)
+	defer log.Close()
 
-	seen := make(map[uint32]empty_t)
+	h := fnv.New64()
+
+	seen := make(map[uint64]empty_t)
 
 	// Generate all the hashes
 	for fr.Read() {
-		name, seq := fr.Get()
+		name, seq := fr.GetRaw()
 
-		hv := hash.Checksum([]byte(seq))
+		h.Reset()
+		h.Write([]byte(seq))
+		hv := h.Sum64()
 		_, ok := seen[hv]
 		if !ok {
+			out.Write([]byte(">"))
 			out.Write([]byte(name))
 			out.Write([]byte("\n"))
 			out.Write([]byte(seq))
-			out.Write("\n")
-			seen[hv] = empty_t
+			out.Write([]byte("\n"))
+			seen[hv] = empty
+		} else {
+			log.Write([]byte(name))
+			log.Write([]byte("\n"))
 		}
 	}
 }

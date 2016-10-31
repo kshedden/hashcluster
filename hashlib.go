@@ -1,3 +1,35 @@
+// These functions are used to generate and sort minhashes for a
+// collection of biological sequences.
+//
+// The minhash is contructed from a kmer hash.  The kmer hash is
+// applied on a rolling basis to the entire sequence.  The minhash is
+// the minimum of these kmer hash values.
+//
+// The kmer hash is obtained by assigning iid standard Gaussian values
+// to each base at each location in the kmer, then summing the values
+// based on a given kmer sequence.
+//
+// The functions defined below generate a given number of minhashes
+// for an input set of sequences.  In the first stage, the sequences
+// are processed in a fixed order (not necessarily in their input
+// order).  The order information and all minhash values are written
+// to files.  In the second stage, each sequence of minhash values is
+// argsorted.
+//
+// Example:
+//
+// The order in which the results are stored, relative to the ordering
+// in the sequence file:
+//   position = [3, 1, 0, 2]
+//
+// Two sequences of minhash values:
+//   hash1 = [0.3, -0.5, -1.2, -4.5]
+//   hash2 = [-0.2, -0.1, -3.2, 1.5]
+//
+// The final result:
+//   srt1 = [2, 0, 1, 3]
+//   srt2 = [0, 3, 1, 2]
+
 package hashcluster
 
 import (
@@ -5,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"runtime"
 	"sort"
 )
 
@@ -74,9 +107,9 @@ func (ph *PKHash) Calc(seq []int) float64 {
 func GenHashes(fasta io.Reader, hashout []io.Writer, namesout io.Writer, posout io.Writer, km int) {
 
 	type qrec struct {
-		seq_ix    int64
+		seq_ix    uint32
 		name      string
-		hash_vals []float64
+		hash_vals []float32
 	}
 
 	numhash := len(hashout)
@@ -95,7 +128,7 @@ func GenHashes(fasta io.Reader, hashout []io.Writer, namesout io.Writer, posout 
 	// Run this concurrently to harvest data from the channel and write to disk.
 	go func() {
 		for r := range rchan {
-			err := binary.Write(posout, binary.LittleEndian, r.seq_ix)
+			err := binary.Write(posout, binary.LittleEndian, uint32(r.seq_ix))
 			if err != nil {
 				panic(err)
 			}
@@ -128,11 +161,11 @@ func GenHashes(fasta io.Reader, hashout []io.Writer, namesout io.Writer, posout 
 		// Generate all hashes for one sequence
 		go func(seq []int, seq_ix int) {
 			defer func() { <-sem }()
-			hash_vals := make([]float64, numhash)
+			hash_vals := make([]float32, numhash)
 			for k := 0; k < numhash; k++ {
-				hash_vals[k] = hashes[k].MinHash(seq)
+				hash_vals[k] = float32(hashes[k].MinHash(seq))
 			}
-			rchan <- &qrec{seq_ix: int64(seq_ix), name: name, hash_vals: hash_vals}
+			rchan <- &qrec{seq_ix: uint32(seq_ix), name: name, hash_vals: hash_vals}
 		}(seq, jj)
 
 		if jj%1000 == 0 {
@@ -150,14 +183,14 @@ func GenHashes(fasta io.Reader, hashout []io.Writer, namesout io.Writer, posout 
 	<-done
 }
 
-// The hashes are sorted and stored in row-wise as (index, hash),
-// where index is int64 and hash is float64.
-func SortHashes(in []io.Reader, pos io.Reader, out []io.Writer) {
+// SortHashes argsorts sequences of minhash values.
+func SortHashes(hashin []io.Reader, rout []io.Writer, posin io.Reader) {
 
-	var idx []int64
+	// Read position information
+	var idx []uint32
 	for {
-		var x int64
-		err := binary.Read(pos, binary.LittleEndian, &x)
+		var x uint32
+		err := binary.Read(posin, binary.LittleEndian, &x)
 		if err == io.EOF {
 			break
 		}
@@ -167,58 +200,74 @@ func SortHashes(in []io.Reader, pos io.Reader, out []io.Writer) {
 		idx = append(idx, x)
 	}
 
-	numhash := len(in)
-	ncon := 10 // limit concurrency
-	sem := make(chan bool, ncon)
+	// Workspaces
+	hashw := make([]float32, len(idx))
+	inds := make([]uint32, len(idx))
+
+	numhash := len(hashin)
 	for k := 0; k < numhash; k++ {
-		sem <- true
-		go sortbyhash(in[k], out[k], idx, sem)
 		fmt.Printf("  %d\n", k)
-	}
-
-	// Wait for all sorting to complete before exiting
-	for k := 0; k < ncon; k++ {
-		sem <- true
+		sortbyhash(hashin[k], rout[k], idx, hashw, inds)
+		runtime.GC()
 	}
 }
 
-type drec struct {
-	i int64
-	h float64
+// argsort is a helper that implements sort.Interface, as used by
+// Argsort.
+type argsort struct {
+	s    []float32
+	inds []uint32
 }
 
-type drecs []drec
+func (a argsort) Len() int {
+	return len(a.s)
+}
 
-func (a drecs) Len() int           { return len(a) }
-func (a drecs) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a drecs) Less(i, j int) bool { return a[i].h < a[j].h }
+func (a argsort) Less(i, j int) bool {
+	return a.s[i] < a.s[j]
+}
 
-func sortbyhash(in io.Reader, out io.Writer, ixv []int64, sem chan bool) {
+func (a argsort) Swap(i, j int) {
+	a.s[i], a.s[j] = a.s[j], a.s[i]
+	a.inds[i], a.inds[j] = a.inds[j], a.inds[i]
+}
 
-	defer func() { <-sem }()
+// Argsort sorts the elements of dst while tracking their original
+// order.  At the conclusion of Argsort, dst will contain the original
+// elements of dst but sorted in increasing order, and inds will
+// contain the original position of the elements in the slice such
+// that dst[i] = origDst[inds[i]].  It panics if the lengths of dst
+// and inds do not match.
+func argsort32(dst []float32, inds []uint32) {
+	if len(dst) != len(inds) {
+		panic("floats: length of inds does not match length of slice")
+	}
+	for i := range dst {
+		inds[i] = uint32(i)
+	}
 
-	var seq []drec
+	a := argsort{s: dst, inds: inds}
+	sort.Sort(a)
+}
 
-	jj := 0
-	for {
-		var x float64
-		err := binary.Read(in, binary.LittleEndian, &x)
+func sortbyhash(hashin io.Reader, rout io.Writer, ixv []uint32, hashw []float32, inds []uint32) {
+
+	for jj := 0; ; jj++ {
+		var x float32
+		err := binary.Read(hashin, binary.LittleEndian, &x)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			panic(err)
 		}
-		seq = append(seq, drec{ixv[jj], x})
-		jj++
+		hashw[int(ixv[jj])] = x
 	}
 
-	sort.Sort(drecs(seq))
+	argsort32(hashw, inds)
 
-	for _, v := range seq {
-		err := binary.Write(out, binary.LittleEndian, &v)
-		if err != nil {
-			panic(err)
-		}
+	err := binary.Write(rout, binary.LittleEndian, inds)
+	if err != nil {
+		panic(err)
 	}
 }

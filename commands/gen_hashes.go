@@ -6,16 +6,19 @@ import (
 	"os"
 	"path"
 
-	"github.com/kshedden/gzutils"
 	"github.com/kshedden/hashcluster"
+	"github.com/kshedden/szutils"
 )
 
 var (
-	//hdir string = "/nfs/kshedden/Teal_Furnholm/mockhashes"
-	hdir string = "/nfs/kshedden/Teal_Furnholm/simhashes"
-
 	//fasta_fname string = "/nfs/kshedden/Teal_Furnholm/NCBI_MOCK/NCBI_MOCK_PROT_SMALL_SORT.fasta.gz"
+	//hdir string = "/nfs/kshedden/Teal_Furnholm/mockhashes"
+
 	fasta_fname string = "/nfs/kshedden/Teal_Furnholm/simulated.fasta.gz"
+	hdir        string = "/nfs/kshedden/Teal_Furnholm/simhashes"
+
+	//fasta_fname string = "/scratch/lsa_flux/kshedden/All_Genes_Derep.fasta.gz"
+	//hdir string = "/data/kshedden/Teal_Furnholm/hashes"
 
 	numhash int = 100
 
@@ -37,32 +40,34 @@ func main() {
 	hnames := make([]string, numhash)
 	rnames := make([]string, numhash)
 	for i := 0; i < numhash; i++ {
-		fname := fmt.Sprintf("%02d_raw.bin.gz", i)
+		fname := fmt.Sprintf("%02d_raw.bin.sz", i)
 		fname = path.Join(hdir, fname)
 		hnames[i] = fname
-		fname = fmt.Sprintf("%02d.bin.gz", i)
+		fname = fmt.Sprintf("%02d.bin.sz", i)
 		fname = path.Join(hdir, fname)
 		rnames[i] = fname
 	}
 
-	hashout := gzutils.NewGZFileWriters(hnames)
-	fname := path.Join(hdir, "names.gz")
-	namesout := gzutils.NewGZFileWriter(fname)
-	posname := path.Join(hdir, "pos.gz")
-	posout := gzutils.NewGZFileWriter(posname)
+	posname := path.Join(hdir, "pos.sz")
 
-	hashcluster.GenHashes(rdr, hashout.GetWriters(), namesout.GetWriter(),
-		posout.GetWriter(), km)
+	hashout := szutils.NewFileWriters(hnames)
+	fname := path.Join(hdir, "names.sz")
+	namesout := szutils.NewFileWriter(fname)
+	posout := szutils.NewFileWriter(posname)
+
+	hashcluster.GenHashes(rdr, hashout.GetWriters(), namesout,
+		posout, km)
 
 	hashout.Close()
 	namesout.Close()
 	posout.Close()
 
-	hashin := gzutils.NewGZFileReaders(hnames)
-	hashout2 := gzutils.NewGZFileWriters(rnames)
-	posin := gzutils.NewGZFileReader(posname)
+	hashin := szutils.NewFileReaders(hnames)
+	rout := szutils.NewFileWriters(rnames)
+	posin := szutils.NewFileReader(posname)
 
-	hashcluster.SortHashes(hashin.GetReaders(), posin.GetReader(), hashout2.GetWriters())
+	hashcluster.SortHashes(hashin.GetReaders(), rout.GetWriters(), posin)
 
-	hashout2.Close()
+	hashin.Close()
+	posin.Close()
 }

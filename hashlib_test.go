@@ -83,5 +83,5 @@ func TestGenHashes(t *testing.T) {
 	for i := 0; i < numhash; i++ {
 		shashout[i] = &shashoutb[i]
 	}
-	SortHashes(hashin, posr, shashout)
+	SortHashes(hashin, shashout, posr)
 }
